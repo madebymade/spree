@@ -8,17 +8,9 @@ describe Spree::Api::BaseController do
     end
   end
 
-  context "signed in as a user using an authentication extension" do
-    before do
-      user = double(:email => "spree@example.com")
-      user.stub_chain :spree_roles, pluck: []
-      controller.stub :try_spree_current_user => user
-    end
-
-    it "can make a request" do
-      api_get :index
-      json_response.should == { "products" => [] }
-      response.status.should == 200
+  before do
+    @routes = ActionDispatch::Routing::RouteSet.new.tap do |r|
+      r.draw { get 'index', to: 'spree/api/base#index' }
     end
   end
 
@@ -86,6 +78,44 @@ describe Spree::Api::BaseController do
   end
 
   it "lets a subclass override the product associations that are eager-loaded" do
-    controller.respond_to?(:product_includes, true).should be
+    expect(controller.respond_to?(:product_includes, true)).to be
+  end
+
+  describe '#error_during_processing' do
+    controller(FakesController) do
+      # GET /foo
+      # Simulates a failed API call.
+      def foo
+        raise StandardError
+      end
+    end
+
+    # What would be placed in config/initializers/spree.rb
+    Spree::Api::BaseController.error_notifier = Proc.new do |e, controller|
+      MockHoneybadger.notify_or_ignore(e, rack_env: controller.request.env)
+    end
+
+    ##
+    # Fake HB alert class
+    class MockHoneybadger
+      # https://github.com/honeybadger-io/honeybadger-ruby/blob/master/lib/honeybadger.rb#L136
+      def self.notify_or_ignore(exception, opts = {})
+      end
+    end
+
+    before do
+      user = double(email: "spree@example.com")
+      allow(user).to receive_message_chain :spree_roles, pluck: []
+      allow(Spree.user_class).to receive_messages find_by: user
+      @routes = ActionDispatch::Routing::RouteSet.new.tap do |r|
+        r.draw { get 'foo' => 'fakes#foo' }
+      end
+    end
+
+    it 'should notify notify_error_during_processing' do
+      expect(MockHoneybadger).to receive(:notify_or_ignore).once.with(kind_of(Exception), rack_env: kind_of(Hash))
+      api_get :foo, token: 123
+      expect(response.status).to eq(422)
+    end
   end
 end
